@@ -1,71 +1,199 @@
-# ==========================================
-# My Custom Office Downloader
-# ==========================================
-Clear-Host
-Write-Host "====================================" -ForegroundColor Cyan
-Write-Host "   My Custom Office Downloader" -ForegroundColor Green
-Write-Host "====================================" -ForegroundColor Cyan
-Write-Host ""
+# Install-Office.ps1 - Interactive Office Deployment Tool Installer
 
-# Office Version Selection
-Write-Host "Select Office Version:" -ForegroundColor Yellow
-Write-Host "1. Office LTSC Professional Plus 2021"
-Write-Host "2. Office Professional Plus 2019"
-Write-Host "3. Microsoft 365 Apps for Enterprise"
-$choice = Read-Host "Enter Choice (1/2/3)"
+# Usage:
 
-if ($choice -eq '1') { $Product = "ProPlus2021Volume" }
-elseif ($choice -eq '2') { $Product = "ProPlus2019Volume" }
-else { $Product = "O365ProPlusRetail" }
+# Local: .\install.ps1 (or powershell -ExecutionPolicy Bypass -File .\install.ps1)
 
-Write-Host ""
-Write-Host "Select Applications to EXCLUDE (Type 'y' to exclude, 'n' to keep):" -ForegroundColor Yellow
+# Remote: powershell -c "irm https://raw.githubusercontent.com/mdtusarahmed01a/Microsoft-Office/refs/heads/main/install.ps1 | iex"
 
-$exWord = Read-Host "Exclude Word? (y/n)"
-$exExcel = Read-Host "Exclude Excel? (y/n)"
-$exPPT = Read-Host "Exclude PowerPoint? (y/n)"
-$exAccess = Read-Host "Exclude Access? (y/n)"
+$ErrorActionPreference = "Stop"
 
-# Generate XML
-$xml = @"
-<Configuration>
-  <Add OfficeClientEdition="64" Channel="Current">
-    <Product ID="$Product">
-      <Language ID="en-us" />
-"@
+$repoOwner = "mdtusarahmed01a"
+$repoName = "Microsoft-Office"
+$branch   = "main"
+$baseUrl =
+"https://raw.githubusercontent.com/$repoOwner/$repoName/$branch"
 
-if ($exWord -eq 'y') { $xml += "`n      <ExcludeApp ID=`"Word`" />" }
-if ($exExcel -eq 'y') { $xml += "`n      <ExcludeApp ID=`"Excel`" />" }
-if ($exPPT -eq 'y') { $xml += "`n      <ExcludeApp ID=`"PowerPoint`" />" }
-if ($exAccess -eq 'y') { $xml += "`n      <ExcludeApp ID=`"Access`" />" }
+# Detect execution context
 
-$xml += @"
-    </Product>
-  </Add>
-</Configuration>
-"@
+$scriptPath = $MyInvocation.MyCommand.Path
+$isLocal =
+![string]::IsNullOrEmpty($scriptPath) -and (Test-Path $scriptPath -ErrorAction
+SilentlyContinue)
 
-# Create Temp Directory
-$workDir = "C:\OfficeSetupTemp"
-New-Item -Path $workDir -ItemType Directory -Force | Out-Null
-Set-Location $workDir
+# --- Admin elevation ---
 
-# Save XML
-$xml | Out-File -FilePath "$workDir\config.xml" -Encoding UTF8
+function Test-Admin {
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
-# Download Official ODT
-Write-Host "`nDownloading Official Office Deployment Tool..." -ForegroundColor Cyan
-Invoke-WebRequest -Uri "https://download.microsoft.com/download/2/7/A/27AF1EE6-FA03-4B33-A62E-0C132E2C877D/officedeploymenttool_17830-20162.exe" -OutFile "odt.exe"
+if (-not (Test-Admin)) { if
+($isLocal) {
+        $proc = Start-Process PowerShell "-ExecutionPolicy Bypass -NoProfile -File `"$scriptPath`"" -Verb RunAs -PassThru         $proc.WaitForExit()         exit $proc.ExitCode     } else {         # Running remotely (irm|iex) — download script to temp and relaunch as admin         $tempDir = Join-Path $env:TEMP "OfficeInstall_$(Get-Date -Format 'yyyyMMddHHmmss')"         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null         $tempScript = Join-Path $tempDir "install.ps1"         Invoke-WebRequest -Uri "$baseUrl/install.ps1" -OutFile $tempScript -UseBasicParsing         $proc = Start-Process PowerShell "-ExecutionPolicy Bypass -NoProfile -File `"$tempScript`""
+-Verb RunAs -PassThru $proc.WaitForExit() # Cleanup temp directory after
+relaunched script finishes (it may have already cleaned) Remove-Item $tempDir
+-Recurse -Force -ErrorAction SilentlyContinue exit $proc.ExitCode } }
 
-# Extract Tool
-Write-Host "Extracting Setup Files..." -ForegroundColor Cyan
-Start-Process -FilePath ".\odt.exe" -ArgumentList "/extract:$workDir /quiet" -Wait
+# --- Now running as admin ---
 
-# Run Installation
-Write-Host "Downloading and Installing Office (This may take a while)..." -ForegroundColor Green
-Start-Process -FilePath ".\setup.exe" -ArgumentList "/configure config.xml" -Wait
+if
+($isLocal) {
+    $workDir = Split-Path -Parent $scriptPath
+} else {
+    # If we're here, we were remote but somehow already admin (unlikely) or were relaunched from temp
+    # Check if scriptPath is set (if relaunched, it will be)
+    if (![string]::IsNullOrEmpty($scriptPath)
+-and (Test-Path $scriptPath)) { $workDir = Split-Path -Parent $scriptPath } else
+{ # Fallback: create a new temp directory $workDir = Join-Path $env:TEMP
+"OfficeInstall_Runtime" New-Item -ItemType Directory -Path $workDir -Force |
+Out-Null } }
 
-# Cleanup
-Set-Location "C:\"
-Remove-Item -Path $workDir -Recurse -Force
-Write-Host "`nInstallation Completed Successfully!" -ForegroundColor Green
+$setupExe = Join-Path $workDir "setup_office.exe"
+$xmlSource = Join-Path $workDir
+"2019_cfg.xml"
+
+# Download missing files
+
+if (-not (Test-Path
+$setupExe)) {
+    Write-Host "Downloading setup_office.exe ..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri "$baseUrl/setup_office.exe"
+-OutFile
+$setupExe -UseBasicParsing
+}
+if (-not (Test-Path $xmlSource)) {
+    Write-Host "Downloading 2019_cfg.xml ..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri "$baseUrl/2019_cfg.xml"
+-OutFile $xmlSource -UseBasicParsing }
+
+# Read original XML template
+
+$originalXml = Get-Content $xmlSource -Raw
+
+# App definitions (must match IDs in 2019_cfg.xml)
+
+$apps = @( @{ Name = "Word"; ID = "Word"; Checked = $true }, @{ Name = "Excel";
+ID = "Excel"; Checked = $true }, @{ Name = "PowerPoint"; ID = "PowerPoint";
+Checked = $true }, @{ Name = "Outlook"; ID = "Outlook"; Checked = $true }, @{
+Name = "OneNote"; ID = "OneNote"; Checked = $true }, @{ Name = "Publisher"; ID =
+"Publisher"; Checked = $true }, @{ Name = "Access"; ID = "Access"; Checked =
+$true
+} )
+
+$cursor = 0
+$appsCount = $apps.Count
+$menuRendered = $false
+$menuTop = 0
+
+function Render-Menu { if
+($script:menuRendered) {
+        # Update only the lines that changed - no clearing
+        for ($i
+= 0;
+$i -lt $appsCount; $i++) {
+            [Console]::SetCursorPosition(0, $script:menuTop + $i)
+            $marker = if ($i
+-eq $cursor) { ">" } else { " " }
+            $check  = if ($apps[$i].Checked) {
+"[X]" } else { "[ ]" } $color  = if ($i -eq
+$cursor) { "Yellow" } else { "White" }
+            Write-Host ("  $marker $check {0,-12} " -f $apps[$i].Name)
+-ForegroundColor
+$color
+        }
+        [Console]::SetCursorPosition(0, $script:menuTop + $appsCount + 1)
+        $color = if ($cursor
+-eq
+$appsCount) { "Green" } else { "White" }
+        Write-Host "  [INSTALL]" -ForegroundColor $color
+    } else {
+        Clear-Host
+        Write-Host "" -ForegroundColor Cyan
+        Write-Host "   ___   ______    _________  
+ .'   `.|_   _ `. |  _   _  | 
+/  .-.  \ | | `. \|_/ | | \_| 
+| |   | | | |  | |    | |     
+\  `-'  /_| |_.' /   _| |_    
+ `.___.'|______.'   |_____|" -ForegroundColor Cyan
+        Write-Host "" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  Use UP/DOWN arrows to navigate, SPACE to toggle, ENTER to proceed"
+        Write-Host ""
+        $script:menuTop = [Console]::CursorTop
+        for ($i
+= 0; $i -lt $appsCount; $i++) {
+            $marker = if ($i -eq
+$cursor) { ">" } else { " " }
+            $check  = if ($apps[$i].Checked) {
+"[X]" } else { "[ ]" } $color  = if ($i -eq
+$cursor) { "Yellow" } else { "White" }
+            Write-Host "  $marker $check $($apps[$i].Name)"
+-ForegroundColor
+$color
+        }
+        Write-Host ""
+        $color = if ($cursor -eq $appsCount)
+{ "Green" } else { "White" } Write-Host " [INSTALL]" -ForegroundColor $color
+Write-Host "" $script:menuRendered = $true } }
+
+function Build-Xml($selectedApps) {
+    $xml = $originalXml
+    foreach ($app in
+$apps) {
+        $id = $app.ID
+        $xml = $xml -replace "<!-- <ExcludeApp ID=`"$id`" /> -->", "<ExcludeApp ID=`"$id`" />"
+    }
+    foreach ($app
+in
+$selectedApps) {
+        $id = $app.ID
+        $xml = $xml -replace "<ExcludeApp ID=`"$id`" />", "<!-- <ExcludeApp ID=`"$id`"
+/> -->" } return $xml }
+
+Render-Menu
+
+while
+($true) {
+    $key = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    switch ($key.VirtualKeyCode)
+{ 38 { # Up arrow if
+($cursor -gt 0) { $cursor-- }; Render-Menu
+        }
+        40 { # Down arrow
+            if ($cursor
+-lt
+$appsCount) { $cursor++ }; Render-Menu
+        }
+        32 { # Space
+            if ($cursor
+-lt $appsCount) {
+                $apps[$cursor].Checked =
+!$apps[$cursor].Checked Render-Menu } } 13 { # Enter if
+($cursor -eq $appsCount) {
+                # Proceed
+                Clear-Host
+                $selected = $apps | Where-Object { $_.Checked }
+                if ($selected.Count
+-eq 0) { Write-Host "No apps selected. Exiting." -ForegroundColor Yellow
+Start-Sleep 2 exit 0 } Write-Host "Selected apps: $($selected.Name -join ', ')"
+-ForegroundColor Green Write-Host "`nGenerating configuration..."
+-ForegroundColor Cyan
+
+                $tempXml = Join-Path $env:TEMP "office365-install-$(Get-Date -Format 'yyyyMMddHHmmss').xml"
+                $newXml = Build-Xml $selected
+                Set-Content -Path $tempXml -Value $newXml -Encoding UTF8
+
+                Write-Host "Starting Office Deployment Tool..." -ForegroundColor Cyan
+                & $setupExe /configure $tempXml
+
+                Write-Host "`nCleaning up..." -ForegroundColor Gray
+                Remove-Item $tempXml -Force -ErrorAction SilentlyContinue
+                exit 0
+            } elseif ($cursor -lt $appsCount) {
+                $apps[$cursor].Checked = !$apps[$cursor].Checked
+                Render-Menu
+            }
+        }
+    }
+
+}
